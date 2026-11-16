@@ -1,0 +1,60 @@
+symbol,sector
+RELIANCE,Energy
+HDFCBANK,Banking
+ICICIBANK,Banking
+SBIN,Banking
+AXISBANK,Banking
+KOTAKBANK,Banking
+INDUSINDBK,Banking
+BANKBARODA,Banking
+BAJFINANCE,Financial Services
+BAJAJFINSV,Financial Services
+SHRIRAMFIN,Financial Services
+LICI,Financial Services
+SBILIFE,Financial Services
+HDFCLIFE,Financial Services
+INFY,IT
+TCS,IT
+WIPRO,IT
+HCLTECH,IT
+TECHM,IT
+LTIM,IT
+LT,Capital Goods
+ADANIENT,Diversified
+ADANIPORTS,Infrastructure
+BHARTIARTL,Telecom
+ITC,FMCG
+HINDUNILVR,FMCG
+TATACONSUM,FMCG
+ASIANPAINT,Consumer
+TITAN,Consumer
+MARUTI,Auto
+M&M,Auto
+TATAMOTORS,Auto
+EICHERMOT,Auto
+HEROMOTOCO,Auto
+BAJAJ-AUTO,Auto
+SUNPHARMA,Pharma
+DRREDDY,Pharma
+CIPLA,Pharma
+DIVISLAB,Pharma
+APOLLOHOSP,Healthcare
+TATASTEEL,Metals
+JSWSTEEL,Metals
+HINDALCO,Metals
+COALINDIA,Mining
+NTPC,Power
+POWERGRID,Power
+ONGC,Energy
+BPCL,Energy
+GRASIM,Materials
+ULTRACEMCO,Cement
+DLF,Real Estate
+BEL,Defence
+HAL,Defence
+TRENT,Retail
+INDIGO,Aviation
+DMART,Retail
+PIDILITIND,Materials
+GODREJCP,FMCG
+IOC,Energy
