@@ -81,14 +81,15 @@ def add_indicators(df):
     return x
 
 def confirmed_swings(x, left=3, right=3):
-    """A pivot is confirmed only after `right` later candles have closed."""
     highs, lows = [], []
     h = x["High"].to_numpy(dtype=float)
     l = x["Low"].to_numpy(dtype=float)
     for i in range(left, len(x) - right):
-        if h[i] >= np.max(h[i-left:i+right+1]) and np.count_nonzero(h[i] == h[i-left:i+right+1]) == 1:
+        hw = h[i-left:i+right+1]
+        lw = l[i-left:i+right+1]
+        if h[i] >= np.max(hw) and np.count_nonzero(h[i] == hw) == 1:
             highs.append((i, float(h[i])))
-        if l[i] <= np.min(l[i-left:i+right+1]) and np.count_nonzero(l[i] == l[i-left:i+right+1]) == 1:
+        if l[i] <= np.min(lw) and np.count_nonzero(l[i] == lw) == 1:
             lows.append((i, float(l[i])))
     return highs, lows
 
@@ -100,35 +101,32 @@ def analyse(symbol, sector, raw):
     if not highs or not lows:
         return None
 
-    last = x.iloc[-1]
-    prev = x.iloc[-2]
+    last, prev = x.iloc[-1], x.iloc[-2]
     close = float(last.Close)
     atr = float(last.ATR) if pd.notna(last.ATR) and last.ATR > 0 else close * 0.02
     vol_ratio = float(last.Volume / last.VolAvg20) if pd.notna(last.VolAvg20) and last.VolAvg20 > 0 else np.nan
     trend_up = close > float(last.EMA20) > float(last.EMA50)
     trend_dn = close < float(last.EMA20) < float(last.EMA50)
 
-    # Most recent confirmed swing levels that existed before the current candle.
     prior_highs = [(i, p) for i, p in highs if i < len(x)-1]
     prior_lows = [(i, p) for i, p in lows if i < len(x)-1]
+    if not prior_highs or not prior_lows:
+        return None
     sh_i, sh = prior_highs[-1]
     sl_i, sl = prior_lows[-1]
+    bull_break = close > sh and float(prev.Close) <= sh
+    bear_break = close < sl and float(prev.Close) >= sl
 
-    bull_break = float(last.Close) > sh and float(prev.Close) <= sh
-    bear_break = float(last.Close) < sl and float(prev.Close) >= sl
-
-    # Structure direction immediately before a break, inferred from the last break in the history.
     structure = "Neutral"
     for j in range(20, len(x)-1):
-        past_highs = [(i, p) for i, p in highs if i < j]
-        past_lows = [(i, p) for i, p in lows if i < j]
-        if not past_highs or not past_lows:
+        ph = [(i, p) for i, p in highs if i < j]
+        pl = [(i, p) for i, p in lows if i < j]
+        if not ph or not pl:
             continue
-        c = float(x["Close"].iloc[j])
-        pc = float(x["Close"].iloc[j-1])
-        if c > past_highs[-1][1] and pc <= past_highs[-1][1]:
+        c, pc = float(x["Close"].iloc[j]), float(x["Close"].iloc[j-1])
+        if c > ph[-1][1] and pc <= ph[-1][1]:
             structure = "Bullish"
-        elif c < past_lows[-1][1] and pc >= past_lows[-1][1]:
+        elif c < pl[-1][1] and pc >= pl[-1][1]:
             structure = "Bearish"
 
     bos = "—"
@@ -146,14 +144,12 @@ def analyse(symbol, sector, raw):
             bos = "Bearish BOS"
         structure = "Bearish"
 
-    # Liquidity sweep: wick takes a confirmed swing and candle closes back inside.
     sweep = "—"
     if float(last.High) > sh and close < sh:
         sweep = "Buy-side"
     elif float(last.Low) < sl and close > sl:
         sweep = "Sell-side"
 
-    # Find the last opposing candle between the broken swing and break candle.
     bull_ob = bear_ob = None
     if bull_break:
         start = max(sh_i + 1, len(x) - 16)
@@ -170,7 +166,6 @@ def analyse(symbol, sector, raw):
                 bear_ob = (float(row.Low), float(row.High), x.index[i])
                 break
 
-    # Three-candle Fair Value Gap (FVG); latest unfilled gap is reported.
     bull_fvg = bear_fvg = None
     for i in range(len(x)-1, 1, -1):
         a, c = x.iloc[i-2], x.iloc[i]
@@ -198,7 +193,8 @@ def analyse(symbol, sector, raw):
     return {
         "Symbol": symbol, "Sector": sector, "Close": round(close, 2),
         "Change %": round((close/float(prev.Close)-1)*100, 2),
-        "Score": score, "Bias": bias, "Volume x": round(vol_ratio, 2) if np.isfinite(vol_ratio) else np.nan,
+        "Score": score, "Bias": bias,
+        "Volume x": round(vol_ratio, 2) if np.isfinite(vol_ratio) else np.nan,
         "BOS": bos, "CHoCH": choch, "Liquidity sweep": sweep,
         "Swing high": round(sh, 2), "Swing low": round(sl, 2),
         "Entry (reference)": round(entry, 2), "Stop (illustrative)": round(stop, 2),
@@ -229,15 +225,67 @@ def make_chart(r):
     fig.update_layout(height=560, xaxis_rangeslider_visible=False, margin=dict(l=10,r=10,t=30,b=10))
     return fig
 
+# Multi-timeframe functions: 4H is built by resampling Yahoo's hourly candles.
+@st.cache_data(ttl=300, show_spinner=False)
+def fetch_mtf_data(symbol):
+    daily = fetch_history(symbol, "2y", "1d")
+    hourly = fetch_history(symbol, "730d", "1h")
+    fifteen = fetch_history(symbol, "60d", "15m")
+    four_hour = pd.DataFrame()
+    if not hourly.empty:
+        four_hour = hourly.resample("4h").agg({
+            "Open": "first", "High": "max", "Low": "min",
+            "Close": "last", "Volume": "sum"
+        }).dropna()
+    return daily, four_hour, hourly, fifteen
+
+def timeframe_read(raw):
+    if raw is None or raw.empty or len(raw) < 60:
+        return {"Trend": "Insufficient data", "Structure": "—", "EMA": "—",
+                "Close": "—", "Signal": "Unavailable"}
+    x = add_indicators(raw)
+    last = x.iloc[-1]
+    close = float(last.Close)
+    ema20, ema50 = float(last.EMA20), float(last.EMA50)
+    if close > ema20 > ema50:
+        trend, ema = "Bullish", "Bullish alignment"
+    elif close < ema20 < ema50:
+        trend, ema = "Bearish", "Bearish alignment"
+    else:
+        trend, ema = "Neutral", "Mixed"
+
+    highs, lows = confirmed_swings(x)
+    prior_highs = [(i,p) for i,p in highs if i < len(x)-1]
+    prior_lows = [(i,p) for i,p in lows if i < len(x)-1]
+    structure = "No confirmed break"
+    if prior_highs and close > prior_highs[-1][1]:
+        structure = "Bullish break"
+    elif prior_lows and close < prior_lows[-1][1]:
+        structure = "Bearish break"
+
+    if trend == "Bullish" and structure == "Bullish break":
+        signal = "Bullish"
+    elif trend == "Bearish" and structure == "Bearish break":
+        signal = "Bearish"
+    elif trend == "Bullish" and structure != "Bearish break":
+        signal = "Bullish trend"
+    elif trend == "Bearish" and structure != "Bullish break":
+        signal = "Bearish trend"
+    else:
+        signal = "Mixed / wait"
+    return {"Trend": trend, "Structure": structure, "EMA": ema,
+            "Close": round(close, 2), "Signal": signal}
+
 symbols_df = ensure_symbols()
 st.sidebar.header("Scanner settings")
 interval_label = st.sidebar.selectbox("Candle timeframe", ["1 day", "15 minutes", "5 minutes"], index=0)
 interval = {"1 day":"1d", "15 minutes":"15m", "5 minutes":"5m"}[interval_label]
 period = {"1d":"1y", "15m":"60d", "5m":"60d"}[interval]
-max_symbols = st.sidebar.slider("Number of stocks to scan", 5, min(60, len(symbols_df)), min(25, len(symbols_df)))
+max_symbols = st.sidebar.slider("Number of stocks to scan", 5, min(60, len(symbols_df)), min(59, len(symbols_df)))
 st.sidebar.caption("Starter list is editable in symbols.csv. Refresh the F&O list from NSE's official contract information page.")
 if st.sidebar.button("Clear cached market data"):
     fetch_history.clear()
+    fetch_mtf_data.clear()
 scan_button = st.sidebar.button("🔄 Run / refresh scan", type="primary")
 
 if "results" not in st.session_state:
@@ -259,9 +307,10 @@ if scan_button:
         progress.progress(i/len(subset))
     st.session_state.results = out
     status.write(f"Scan complete: {len(out)} stocks returned data.")
-results = st.session_state.results
 
-tabs = st.tabs(["Scanner", "Order blocks & chart", "Sector & breadth", "OI / volume", "Trading journal", "How it works"])
+results = st.session_state.results
+tabs = st.tabs(["Scanner", "Order blocks & chart", "Multi-timeframe", "Sector & breadth", "OI / volume", "Trading journal", "How it works"])
+
 with tabs[0]:
     st.subheader("Bullish and bearish stock scanner")
     if results:
@@ -281,7 +330,7 @@ with tabs[1]:
     st.subheader("Market structure, order blocks & chart")
     if results:
         names = [r["Symbol"] for r in results]
-        chosen = st.selectbox("Choose stock", names)
+        chosen = st.selectbox("Choose stock", names, key="chart_symbol")
         r = next(z for z in results if z["Symbol"] == chosen)
         st.plotly_chart(make_chart(r), use_container_width=True)
         a,b,c,d = st.columns(4)
@@ -301,12 +350,53 @@ with tabs[1]:
         st.info("Run a scan first.")
 
 with tabs[2]:
+    st.subheader("Multi-timeframe trend and structure")
+    st.write("Choose one stock. The app checks Daily, 4H, 1H and 15-minute candles for directional agreement.")
+    available_symbols = symbols_df["symbol"].astype(str).str.upper().tolist()
+    default_symbol = "RELIANCE" if "RELIANCE" in available_symbols else available_symbols[0]
+    selected_mtf = st.selectbox("Choose stock for multi-timeframe analysis", available_symbols,
+                                index=available_symbols.index(default_symbol), key="mtf_symbol")
+    if st.button("Analyse four timeframes", type="primary"):
+        with st.spinner("Downloading multi-timeframe price history. This may take a little while…"):
+            try:
+                daily, four_hour, hourly, fifteen = fetch_mtf_data(selected_mtf)
+                st.session_state["mtf_results"] = {
+                    "symbol": selected_mtf,
+                    "Daily": timeframe_read(daily),
+                    "4H": timeframe_read(four_hour),
+                    "1H": timeframe_read(hourly),
+                    "15M": timeframe_read(fifteen)
+                }
+            except Exception as exc:
+                st.session_state["mtf_error"] = str(exc)
+                st.session_state.pop("mtf_results", None)
+    if st.session_state.get("mtf_error"):
+        st.error("Could not load all timeframe data. Try again later. Details: " + st.session_state["mtf_error"][:250])
+    mtf = st.session_state.get("mtf_results")
+    if mtf and mtf.get("symbol") == selected_mtf:
+        order = ["Daily", "4H", "1H", "15M"]
+        mtf_table = pd.DataFrame([{"Timeframe": tf, **mtf[tf]} for tf in order])
+        st.dataframe(mtf_table, use_container_width=True, hide_index=True)
+        signals = [mtf[tf]["Signal"] for tf in order]
+        bullish = sum(s in ["Bullish", "Bullish trend"] for s in signals)
+        bearish = sum(s in ["Bearish", "Bearish trend"] for s in signals)
+        if bullish == 4:
+            st.success("All four timeframes are bullish by this rule set.")
+        elif bearish == 4:
+            st.error("All four timeframes are bearish by this rule set.")
+        else:
+            st.info(f"Timeframes are mixed: {bullish}/4 bullish and {bearish}/4 bearish. Wait for clearer alignment.")
+        st.caption("4H candles are resampled from Yahoo hourly data. Yahoo data may be delayed, incomplete or unavailable. The latest candle may still be forming. This is a directional filter, not an entry signal.")
+    else:
+        st.info("Select a stock and tap Analyse four timeframes. This analysis runs only for the selected stock to reduce data requests.")
+
+with tabs[3]:
     st.subheader("Sector strength & market breadth")
     if results:
         t = pd.DataFrame([{k:v for k,v in r.items() if k not in ["data","Bull OB","Bear OB","Bull FVG","Bear FVG"]} for r in results])
         sector = t.groupby("Sector").agg(Stocks=("Symbol","count"), AvgChange=("Change %","mean"),
-                    Bullish=("Bias",lambda s:(s=="Bullish").sum()),
-                    Bearish=("Bias",lambda s:(s=="Bearish").sum())).reset_index()
+            Bullish=("Bias",lambda s:(s=="Bullish").sum()),
+            Bearish=("Bias",lambda s:(s=="Bearish").sum())).reset_index()
         sector["AvgChange"] = sector["AvgChange"].round(2)
         st.dataframe(sector.sort_values("AvgChange",ascending=False), use_container_width=True, hide_index=True)
         st.metric("Market breadth (bullish minus bearish)", int((t.Bias=="Bullish").sum()-(t.Bias=="Bearish").sum()))
@@ -314,7 +404,7 @@ with tabs[2]:
     else:
         st.info("Run a scan first.")
 
-with tabs[3]:
+with tabs[4]:
     st.subheader("Open interest & volume")
     st.write("Volume expansion is calculated from price history. Yahoo Finance does not provide dependable NSE stock-futures OI history through this free feed.")
     if results:
@@ -331,6 +421,8 @@ with tabs[3]:
             if results:
                 prices = pd.DataFrame([{"Symbol":r["Symbol"],"Change %":r["Change %"]} for r in results])
                 oi = oi.merge(prices,on="Symbol",how="left")
+            else:
+                oi["Change %"] = np.nan
             oi["Interpretation"] = np.select([
                 (oi["Change %"]>0)&(oi["OI Change %"]>0),
                 (oi["Change %"]<0)&(oi["OI Change %"]>0),
@@ -341,7 +433,7 @@ with tabs[3]:
         else:
             st.error("CSV must contain Symbol, OI, Prev_OI columns.")
 
-with tabs[4]:
+with tabs[5]:
     st.subheader("Trading journal")
     with st.form("trade_form"):
         c1,c2,c3 = st.columns(3)
@@ -368,13 +460,13 @@ with tabs[4]:
     if not journal.empty:
         journal["P&L"] = np.where(journal.exit_price>0,
             np.where(journal.side=="LONG",(journal.exit_price-journal.entry)*journal.quantity,
-                     (journal.entry-journal.exit_price)*journal.quantity), np.nan)
+            (journal.entry-journal.exit_price)*journal.quantity), np.nan)
         st.dataframe(journal,use_container_width=True,hide_index=True)
         st.download_button("Download journal CSV",journal.to_csv(index=False).encode(),"trading_journal.csv","text/csv")
     else:
         st.info("No trades recorded yet.")
 
-with tabs[5]:
+with tabs[6]:
     st.subheader("Methodology, limits and safety")
     st.markdown("""
 - **Universe:** starter sample of NSE F&O underlyings in `symbols.csv`; this is not guaranteed to be the complete current F&O list.
@@ -385,6 +477,7 @@ with tabs[5]:
 - **Liquidity sweep:** wick moves beyond the latest confirmed swing and closes back inside.
 - **Order block:** last opposite-colour candle in the recent segment between the swing and a detected structure break. This is a rule-based approximation.
 - **FVG:** three-candle price gap approximation.
+- **Multi-timeframe:** Daily, 4H, 1H and 15M EMA / swing-break filters. The 4H timeframe is resampled from hourly Yahoo candles; this is not an exchange-native 4H feed.
 - **Risk levels:** reference close, 1.5 ATR stop, 2 ATR target 1 and 3 ATR target 2. These are illustrative, not recommendations or guaranteed outcomes.
 - **OI:** import a properly matched futures OI CSV. Do not mix expiries or compare unlike contracts.
 - **Sector breadth:** only successfully scanned symbols in your current sample, not the entire NSE market.
