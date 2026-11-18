@@ -275,12 +275,19 @@ def signal_engine(symbol):
         elif sh and float(last.High) > sh[-1] and float(last.Close) < sh[-1] and direction == "Bearish":
             score -= 1; reasons.append("15M buy-side liquidity sweep detected.")
     side = "LONG" if direction == "Bullish" else "SHORT" if direction == "Bearish" else "NONE"
+    # Require 1H market-structure confirmation before displaying a potential setup.
+    structure_ok = (
+        (side == "LONG" and hourly["Structure"] == "Bullish BOS") or
+        (side == "SHORT" and hourly["Structure"] == "Bearish BOS")
+    )
     aligned = (side=="LONG" and score>=5) or (side=="SHORT" and score<=-5)
     retest_ok = bool(bull_retest if side=="LONG" else bear_retest) if side!="NONE" else False
-    if aligned and retest_ok:
+    if aligned and retest_ok and structure_ok:
         status = "Potential long setup" if side=="LONG" else "Potential short setup"
     elif direction != "Mixed" and abs(score) >= 2:
         status = "Watch — confirmation incomplete"
+        if side != "NONE" and not structure_ok:
+            reasons.append("Required 1H BOS confirmation is missing.")
     else:
         status = "No setup"
     atr = fifteen.get("ATR")
